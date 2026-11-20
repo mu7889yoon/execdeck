@@ -23,4 +23,6 @@ Pass overrides with `-var`, a `.tfvars` file, or environment-specific configurat
 
 Lambda MicroVM image build logs are written to `/aws/lambda-microvms/<name>`. The default provider timeout for image creation is extended to 60 minutes because AWS builds the image asynchronously.
 
+Attendee MicroVMs use a Lambda egress connector in a dedicated VPC. The subnet has no internet route and the connector's security group has no outbound rules. The image build uses AWS's default network so package installation in the Dockerfile can reach its registries.
+
 The CloudFront default hostname requires AWS's default viewer TLS policy. To require a newer TLS policy, configure a custom domain and an ACM certificate in `us-east-1` before extending the distribution configuration.

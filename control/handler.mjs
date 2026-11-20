@@ -70,6 +70,7 @@ function alreadyTerminated(error) {
 
 export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
   const sessionTTLSeconds = config.sessionTTLSeconds || 60 * 60
+  if (!config.egressConnectorArn) throw new Error('A MicroVM egress connector is required')
   const validOrigin = event => {
     const supplied = header(event, 'x-workshop-origin')
     const expected = config.originVerifyToken
@@ -196,7 +197,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
                 imageIdentifier: config.imageArn,
                 clientToken: existing.sid,
                 ingressNetworkConnectors: [config.ingressConnectorArn],
-                egressNetworkConnectors: [],
+                egressNetworkConnectors: [config.egressConnectorArn],
                 idlePolicy: { autoResumeEnabled: true, maxIdleDurationSeconds: 600, suspendedDurationSeconds: 1200 },
                 maximumDurationInSeconds: sessionTTLSeconds,
               })
@@ -244,7 +245,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
           imageIdentifier: config.imageArn,
           clientToken: sid,
           ingressNetworkConnectors: [config.ingressConnectorArn],
-          egressNetworkConnectors: [],
+          egressNetworkConnectors: [config.egressConnectorArn],
           idlePolicy: { autoResumeEnabled: true, maxIdleDurationSeconds: 600, suspendedDurationSeconds: 1200 },
           maximumDurationInSeconds: sessionTTLSeconds,
         })

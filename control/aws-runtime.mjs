@@ -161,6 +161,7 @@ const handler = createHandler({
     sessionTTLSeconds: Number(process.env.SESSION_TTL_SECONDS || 3600),
     originVerifyToken: process.env.ORIGIN_VERIFY_TOKEN,
     ingressConnectorArn: `arn:aws:lambda:${region}:aws:network-connector:aws-network-connector:ALL_INGRESS`,
+    egressConnectorArn: process.env.EGRESS_CONNECTOR_ARN,
   },
 })
 

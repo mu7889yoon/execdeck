@@ -117,18 +117,17 @@ resource "aws_s3_object" "microvm" {
 }
 
 resource "aws_lambdamicrovms_image" "workshop" {
-  count                     = var.deploy_workshop ? 1 : 0
-  name                      = var.name
-  description               = "ExecDeck workshop workspace runtime"
-  base_image_arn            = "arn:${data.aws_partition.current.partition}:lambda:${var.aws_region}:aws:microvm-image:al2023-1"
-  build_role_arn            = aws_iam_role.microvm_build.arn
-  egress_network_connectors = []
+  count          = var.deploy_workshop ? 1 : 0
+  name           = var.name
+  description    = "ExecDeck workshop workspace runtime"
+  base_image_arn = "arn:${data.aws_partition.current.partition}:lambda:${var.aws_region}:aws:microvm-image:al2023-1"
+  build_role_arn = aws_iam_role.microvm_build.arn
   environment_variables = {
     WORKSPACE_ROOT = var.workspace_root
   }
 
   cpu_configuration {
-    architecture = "arm64"
+    architecture = "ARM_64"
   }
 
   code_artifact {
@@ -244,7 +243,7 @@ data "aws_iam_policy_document" "control" {
     resources = [aws_lambdamicrovms_image.workshop[0].arn]
   }
   statement {
-    sid     = "PassManagedIngressConnector"
+    sid     = "PassWorkshopNetworkConnectors"
     actions = ["lambda:PassNetworkConnector"]
     # AWS does not support resource-level scoping for this permission-only action.
     resources = ["*"]
@@ -293,11 +292,12 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      SESSION_TABLE       = aws_dynamodb_table.sessions[0].name
-      MICROVM_IMAGE_ARN   = aws_lambdamicrovms_image.workshop[0].arn
-      MAX_SESSIONS        = tostring(var.max_sessions)
-      SESSION_TTL_SECONDS = tostring(var.session_ttl_seconds)
-      ORIGIN_VERIFY_TOKEN = random_password.origin_verify.result
+      SESSION_TABLE        = aws_dynamodb_table.sessions[0].name
+      MICROVM_IMAGE_ARN    = aws_lambdamicrovms_image.workshop[0].arn
+      EGRESS_CONNECTOR_ARN = aws_lambdacore_network_connector.isolated[0].arn
+      MAX_SESSIONS         = tostring(var.max_sessions)
+      SESSION_TTL_SECONDS  = tostring(var.session_ttl_seconds)
+      ORIGIN_VERIFY_TOKEN  = random_password.origin_verify.result
     }
   }
 
@@ -514,6 +514,9 @@ resource "aws_cloudfront_distribution" "site" {
     # CloudFront forces TLSv1 when using its default *.cloudfront.net certificate.
     minimum_protocol_version = "TLSv1"
   }
+
+  # Publish the workshop after its API route can invoke the control Lambda.
+  depends_on = [aws_apigatewayv2_route.api, aws_apigatewayv2_stage.default, aws_lambda_permission.api_gateway]
 }
 
 resource "aws_s3_object" "site" {

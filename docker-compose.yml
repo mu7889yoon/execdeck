@@ -24,7 +24,7 @@ services:
   slides:
     image: node:24-bookworm-slim
     working_dir: /app
-    command: sh -c "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    command: sh -c "npm ci --no-audit --no-fund && npm run dev"
     environment:
       WORKSHOP_API_TARGET: http://sandbox:8080
       WORKSHOP_TERMINAL_TARGET: ws://sandbox:8081

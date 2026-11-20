@@ -50,11 +50,11 @@ Requirements:
 
 - Terraform `>= 1.9`.
 - Docker available to the machine running Terraform.
-- AWS credentials with permissions to create the resources in `infra/` and pass the MicroVM build role to Lambda.
+- AWS credentials with permissions to create the resources in `infrastructure/` and pass the MicroVM build role to Lambda.
 - An AWS Region where Lambda MicroVMs are available. The default is `ap-northeast-1`.
 
 ```sh
-cd infra
+cd infrastructure
 terraform init
 terraform apply
 ```
@@ -133,12 +133,12 @@ In local mode, Docker Compose runs Slidev and the same workspace API plus a PTY 
 | `microvm/workspace/` | Files included in each attendee workspace |
 | `microvm/` | Local sandbox and Lambda MicroVM runtime |
 | `control/` | AWS session API and cleanup handlers |
-| `infra/` | Terraform deployment |
+| `infrastructure/` | Terraform deployment |
 | `.agents/skills/execdeck-workshop/` | Bundled Codex workshop authoring skill |
 
 ## Resource usage and cleanup
 
-Each cloud attendee can start a separate MicroVM. The default limit is 30 concurrent sessions and the default lifetime is one hour. Adjust `max_sessions` and `session_ttl_seconds` in `infra/variables.tf` for your event. Attendees should use **Stop** when they finish; the scheduled cleanup also handles sessions that reach their time limit.
+Each cloud attendee can start a separate MicroVM. The default limit is 30 concurrent sessions and the default lifetime is one hour. Adjust `max_sessions` and `session_ttl_seconds` in `infrastructure/variables.tf` for your event. Attendees should use **Stop** when they finish; the scheduled cleanup also handles sessions that reach their time limit.
 
 AWS charges may apply for Lambda MicroVM usage, Lambda control functions, image builds, CloudFront, S3, DynamoDB, API Gateway, and CloudWatch Logs. Review AWS pricing and your account quotas before sharing a public workshop URL. `terraform destroy` removes the stack; the local Docker workspace is separate and is removed with `docker compose down --volumes`.
 

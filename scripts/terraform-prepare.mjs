@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const marker = join(root, 'infra', 'build', 'prepare-hash')
+const marker = join(root, 'infrastructure', 'build', 'prepare-hash')
 const excluded = new Set(['.git', '.terraform', 'node_modules', 'dist', 'build'])
 
 async function sourceFiles(directory, prefix = '') {
@@ -23,9 +23,8 @@ async function sourceFiles(directory, prefix = '') {
 
 async function fingerprint() {
   const hash = createHash('sha256')
-  for (const path of ['control', 'slides', 'microvm', 'skills', 'scripts']) {
+  for (const path of ['control', 'slides', 'scripts']) {
     const absolute = join(root, path)
-    if (!await stat(absolute).then(() => true).catch(() => false)) continue
     for (const relativePath of (await sourceFiles(absolute)).sort()) {
       hash.update(`${path}/${relativePath}\0`)
       hash.update(await readFile(join(absolute, relativePath)))
@@ -34,7 +33,7 @@ async function fingerprint() {
   return hash.digest('hex')
 }
 
-async function run(command, args) {
+function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8' })
   if (result.stdout) process.stderr.write(result.stdout)
   if (result.stderr) process.stderr.write(result.stderr)
@@ -51,9 +50,9 @@ const built = oldHash.trim() === hash
   && await stat(nodeModules).then(() => true).catch(() => false)
 
 if (!built) {
-  await run('npm', ['ci', '--prefix', 'control', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'])
-  await run('npm', ['ci', '--prefix', 'slides', '--no-audit', '--no-fund'])
-  await run('npm', ['run', 'build', '--prefix', 'slides'])
+  run('npm', ['ci', '--prefix', 'control', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'])
+  run('npm', ['ci', '--prefix', 'slides', '--no-audit', '--no-fund'])
+  run('npm', ['run', 'build', '--prefix', 'slides'])
   await mkdir(dirname(marker), { recursive: true })
   await writeFile(marker, `${hash}\n`)
 }
@@ -71,4 +70,4 @@ async function listFiles(directory, prefix = '') {
 }
 
 const files = await listFiles(join(root, 'slides', 'dist'))
-process.stdout.write(`${JSON.stringify({ files: JSON.stringify(files), fingerprint: hash })}\n`)
+process.stdout.write(`${JSON.stringify({ files: JSON.stringify(files) })}\n`)

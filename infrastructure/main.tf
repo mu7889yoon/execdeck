@@ -96,7 +96,6 @@ resource "aws_cloudwatch_log_group" "microvm_build" {
 data "external" "prepare" {
   count   = var.deploy_workshop ? 1 : 0
   program = ["bash", "${path.module}/../scripts/terraform-prepare.sh"]
-  query   = { root = path.module }
 }
 
 data "archive_file" "microvm" {

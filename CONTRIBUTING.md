@@ -21,6 +21,6 @@ Thanks for helping improve ExecDeck. Issues, documentation fixes, and focused pu
 - `slides/` contains the Slidev deck and browser workbench.
 - `microvm/` contains the sandbox runtime and starter workspace.
 - `control/` contains the AWS API and cleanup handlers.
-- `infra/` contains the Terraform stack.
+- `infrastructure/` contains the Terraform stack.
 
 Local preview uses Docker Compose from the repository root. Cloud changes should account for both the local container and Lambda MicroVM image paths.

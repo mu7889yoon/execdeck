@@ -210,8 +210,7 @@ function startShell() {
     shellOutput = `${shellOutput}${data}`.slice(-65_536)
     sendFrame(shellSocket, { type: 'output', data })
   })
-  shellPty.onExit(({ exitCode, signal }) => {
-    sendFrame(shellSocket, { type: 'exit', exitCode, signal })
+  shellPty.onExit(() => {
     shellPty = undefined
     if (shellSocket?.readyState === WebSocket.OPEN) shellSocket.close(1000, 'shell exited')
   })

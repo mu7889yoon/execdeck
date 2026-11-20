@@ -46,11 +46,11 @@ Terraform が `microvm/Dockerfile` から MicroVM ランタイムをビルドし
 
 - Terraform `>= 1.9`。
 - Terraform を実行するマシンで利用可能な Docker。
-- `infra/` のリソースを作成し、Lambda に MicroVM ビルドロールを渡せる AWS 認証情報。
+- `infrastructure/` のリソースを作成し、Lambda に MicroVM ビルドロールを渡せる AWS 認証情報。
 - Lambda MicroVM が利用できる AWS リージョン。初期値は `ap-northeast-1` です。
 
 ```sh
-cd infra
+cd infrastructure
 terraform init
 terraform apply
 ```
@@ -119,7 +119,7 @@ flowchart TB
 
 ## リソースと削除
 
-クラウドでは参加者ごとに MicroVM が起動します。初期値では同時に最大 30 セッション、各セッションは最大 1 時間です。イベントに合わせて `infra/variables.tf` の `max_sessions` と `session_ttl_seconds` を調整してください。終了時は **Stop** を使い、時間切れの場合は定期クリーンアップが終了処理を行います。
+クラウドでは参加者ごとに MicroVM が起動します。初期値では同時に最大 30 セッション、各セッションは最大 1 時間です。イベントに合わせて `infrastructure/variables.tf` の `max_sessions` と `session_ttl_seconds` を調整してください。終了時は **Stop** を使い、時間切れの場合は定期クリーンアップが終了処理を行います。
 
 Lambda MicroVM、制御 Lambda、イメージビルド、CloudFront、S3、DynamoDB、API Gateway、CloudWatch Logs などの AWS 利用料が発生する場合があります。公開前に AWS の料金とアカウントクォータを確認してください。`terraform destroy` は AWS のスタックを削除します。ローカルの Docker ワークスペースは `docker compose down --volumes` で削除します。
 

@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible problem in ExecDeck.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include AWS credentials, session cookies, private workshop files, or personal data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the mode (local Docker or AWS) and concise steps.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: OS, Docker, Terraform, and AWS Region if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: text

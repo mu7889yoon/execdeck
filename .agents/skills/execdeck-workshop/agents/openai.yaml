@@ -1,0 +1,4 @@
+interface:
+  display_name: "ExecDeck Workshop Creator"
+  short_description: "Create hands-on Slidev workshops with ExecDeck."
+  default_prompt: "Create a hands-on Slidev workshop in this ExecDeck repository."

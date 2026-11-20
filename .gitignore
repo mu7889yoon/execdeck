@@ -1,0 +1,9 @@
+.terraform/
+infra/build/
+slides/node_modules/
+slides/dist/
+control/node_modules/
+microvm/node_modules/
+*.tfstate*
+*.auto.tfvars*
+.DS_Store

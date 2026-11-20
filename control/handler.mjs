@@ -3,7 +3,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 const COOKIE_NAME = 'workshop_sid'
 const MAX_BODY_BYTES = 256 * 1024
 const MAX_FILE_BYTES = 180_000
+const WORKSPACE_PORT = 8080
 const TERMINAL_PORT = 8081
+const LAUNCH_FAILED = { error: 'Could not start the workspace. Try again.' }
 
 function header(event, name) {
   const wanted = name.toLowerCase()
@@ -77,20 +79,25 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
     return Boolean(expected && supplied && equalSecret(supplied, expected))
   }
 
-  async function vmRequest(session, path, body) {
+  async function vmToken(session, port, expirationInMinutes) {
     const tokenResponse = await microvms.createAuthToken({
       microvmIdentifier: session.microvmId,
-      expirationInMinutes: 1,
-      allowedPorts: [{ port: 8080 }],
+      expirationInMinutes,
+      allowedPorts: [{ port }],
     })
     const token = tokenResponse.authToken?.['X-aws-proxy-auth']
     if (!token) throw new Error('MicroVM auth token was not returned')
+    return token
+  }
+
+  async function vmRequest(session, path, body) {
+    const token = await vmToken(session, WORKSPACE_PORT, 1)
     const response = await fetchImpl(`${normalizeEndpoint(session.endpoint)}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: {
         'content-type': 'application/json',
         'X-aws-proxy-auth': token,
-        'X-aws-proxy-port': '8080',
+        'X-aws-proxy-port': String(WORKSPACE_PORT),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(18_000),
@@ -109,13 +116,8 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         await store.releaseSession(session)
         return { status: 'expired', joined: false }
       }
-      if (current.state === 'SUSPENDED') {
-        const waking = await vmRequest(session, '/api/health')
-        if (waking.status !== 200 || waking.payload.ok !== true) return { status: 'starting' }
-        await store.updateSession(session.pk, { status: 'READY' })
-        return { status: 'ready' }
-      }
-      if (current.state !== 'RUNNING') return { status: 'starting' }
+      if (!['RUNNING', 'SUSPENDED'].includes(current.state)) return { status: 'starting' }
+      // An authenticated health request also resumes a suspended MicroVM.
       const health = await vmRequest(session, '/api/health')
       if (health.status !== 200 || health.payload.ok !== true) return { status: 'starting' }
       if (session.status !== 'READY') await store.updateSession(session.pk, { status: 'READY' })
@@ -152,6 +154,29 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
     }
   }
 
+  async function launchSession(session) {
+    let vm
+    try {
+      vm = await microvms.run({
+        imageIdentifier: config.imageArn,
+        clientToken: session.sid,
+        ingressNetworkConnectors: [config.ingressConnectorArn],
+        egressNetworkConnectors: [config.egressConnectorArn],
+        idlePolicy: { autoResumeEnabled: true, maxIdleDurationSeconds: 600, suspendedDurationSeconds: 1200 },
+        maximumDurationInSeconds: sessionTTLSeconds,
+      })
+      if (!vm.microvmId || !vm.endpoint) throw new Error('RunMicrovm returned no endpoint')
+      const changes = { status: 'STARTING', microvmId: vm.microvmId, endpoint: normalizeEndpoint(vm.endpoint) }
+      await store.updateSession(session.pk, changes)
+      Object.assign(session, changes)
+      return true
+    } catch (error) {
+      await cleanFailedLaunch(session, vm)
+      console.error('MicroVM launch failed:', error.name || 'Error', error.message || '')
+      return false
+    }
+  }
+
   return async function handler(event) {
     const method = event.requestContext?.http?.method || event.httpMethod || 'GET'
     const path = event.rawPath || event.path || '/'
@@ -173,7 +198,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
     if (method === 'POST' && path === '/api/join') {
       let input
       try { input = parseBody(event) } catch (error) { return respond(error.statusCode || 400, { error: error.message }) }
-      if (typeof input.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.requestId)) {
+      if (typeof input?.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.requestId)) {
         return respond(400, { error: 'Reload the page and try joining again.' })
       }
 
@@ -190,29 +215,8 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       if (previous) {
         const existing = await store.getSession(previous.sid)
         if (existing) {
-          if (!existing.microvmId && existing.status === 'LAUNCHING') {
-            let vm
-            try {
-              vm = await microvms.run({
-                imageIdentifier: config.imageArn,
-                clientToken: existing.sid,
-                ingressNetworkConnectors: [config.ingressConnectorArn],
-                egressNetworkConnectors: [config.egressConnectorArn],
-                idlePolicy: { autoResumeEnabled: true, maxIdleDurationSeconds: 600, suspendedDurationSeconds: 1200 },
-                maximumDurationInSeconds: sessionTTLSeconds,
-              })
-              if (!vm.microvmId || !vm.endpoint) throw new Error('RunMicrovm returned no endpoint')
-              await store.updateSession(existing.pk, {
-                status: 'STARTING',
-                microvmId: vm.microvmId,
-                endpoint: normalizeEndpoint(vm.endpoint),
-              })
-              Object.assign(existing, { status: 'STARTING', microvmId: vm.microvmId, endpoint: normalizeEndpoint(vm.endpoint) })
-            } catch (error) {
-              await cleanFailedLaunch(existing, vm)
-              console.error('MicroVM launch recovery failed:', error.name || 'Error')
-              return respond(502, { error: 'Could not start the workspace. Try again.' })
-            }
+          if (!existing.microvmId && existing.status === 'LAUNCHING' && !await launchSession(existing)) {
+            return respond(502, LAUNCH_FAILED)
           }
           return respond(202, { joined: true, status: existing.status }, [cookie(previous.sid, Math.max(1, existing.expiresAt - Math.floor(Date.now() / 1000)))])
         }
@@ -239,28 +243,8 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         return respond(429, { error: 'All workshop workspaces are busy. Please contact the workshop host.' })
       }
 
-      let vm
-      try {
-        vm = await microvms.run({
-          imageIdentifier: config.imageArn,
-          clientToken: sid,
-          ingressNetworkConnectors: [config.ingressConnectorArn],
-          egressNetworkConnectors: [config.egressConnectorArn],
-          idlePolicy: { autoResumeEnabled: true, maxIdleDurationSeconds: 600, suspendedDurationSeconds: 1200 },
-          maximumDurationInSeconds: sessionTTLSeconds,
-        })
-        if (!vm.microvmId || !vm.endpoint) throw new Error('RunMicrovm returned no endpoint')
-        await store.updateSession(session.pk, {
-          status: 'STARTING',
-          microvmId: vm.microvmId,
-          endpoint: normalizeEndpoint(vm.endpoint),
-        })
-        return respond(202, { joined: true, status: 'starting' }, [cookie(sid, sessionTTLSeconds)])
-      } catch (error) {
-        await cleanFailedLaunch(session, vm)
-        console.error('MicroVM launch failed:', error.name || 'Error', error.message || '')
-        return respond(502, { error: 'Could not start the workspace. Try again.' })
-      }
+      if (!await launchSession(session)) return respond(502, LAUNCH_FAILED)
+      return respond(202, { joined: true, status: 'starting' }, [cookie(sid, sessionTTLSeconds)])
     }
 
     const sid = sessionId(event)
@@ -269,36 +253,28 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       return respond(401, { error: 'Join the workshop first.' })
     }
 
-    if (method === 'GET' && (path === '/api/workspace/tree' || path === '/api/workspace/file')) {
-      const state = await updateSessionReadiness(session)
-      if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting.' })
-      const query = path === '/api/workspace/file'
-        ? `?path=${encodeURIComponent(event.queryStringParameters?.path || '')}`
-        : ''
-      try {
-        const result = await vmRequest(session, `${path}${query}`)
-        return respond(result.status, result.payload)
-      } catch (error) {
-        console.error('Workspace read failed:', error.name || 'Error')
-        return respond(502, { error: 'Could not read the workspace.' })
-      }
-    }
-
-    if (method === 'POST' && path === '/api/workspace/file') {
+    const readWorkspace = method === 'GET' && ['/api/workspace/tree', '/api/workspace/file'].includes(path)
+    const writeWorkspace = method === 'POST' && path === '/api/workspace/file'
+    if (readWorkspace || writeWorkspace) {
       let input
-      try { input = parseBody(event) } catch (error) { return respond(error.statusCode || 400, { error: error.message }) }
-      if (typeof input.path !== 'string' || input.path.length > 1024 || typeof input.content !== 'string') {
-        return respond(400, { error: 'A valid workspace path and file content are required.' })
+      let vmPath = path
+      if (writeWorkspace) {
+        try { input = parseBody(event) } catch (error) { return respond(error.statusCode || 400, { error: error.message }) }
+        if (typeof input?.path !== 'string' || input.path.length > 1024 || typeof input.content !== 'string') {
+          return respond(400, { error: 'A valid workspace path and file content are required.' })
+        }
+        if (Buffer.byteLength(input.content, 'utf8') > MAX_FILE_BYTES) return respond(413, { error: 'The file is too large.' })
+      } else if (path === '/api/workspace/file') {
+        vmPath += `?path=${encodeURIComponent(event.queryStringParameters?.path || '')}`
       }
-      if (Buffer.byteLength(input.content, 'utf8') > MAX_FILE_BYTES) return respond(413, { error: 'The file is too large.' })
       const state = await updateSessionReadiness(session)
       if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting.' })
       try {
-        const result = await vmRequest(session, path, input)
+        const result = await vmRequest(session, vmPath, input)
         return respond(result.status, result.payload)
       } catch (error) {
-        console.error('Workspace write failed:', error.name || 'Error')
-        return respond(502, { error: 'Could not save the workspace file.' })
+        console.error(writeWorkspace ? 'Workspace write failed:' : 'Workspace read failed:', error.name || 'Error')
+        return respond(502, { error: writeWorkspace ? 'Could not save the workspace file.' : 'Could not read the workspace.' })
       }
     }
 
@@ -306,12 +282,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       const state = await updateSessionReadiness(session)
       if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting. Wait a moment and reconnect.' })
       try {
-        const tokenResponse = await microvms.createAuthToken({
-          microvmIdentifier: session.microvmId,
-          expirationInMinutes: 5,
-          allowedPorts: [{ port: TERMINAL_PORT }],
-        })
-        const token = tokenResponse.authToken?.['X-aws-proxy-auth']
+        const token = await vmToken(session, TERMINAL_PORT, 5)
         if (!token) throw new Error('MicroVM auth token was not returned')
         return respond(200, {
           endpoint: normalizeEndpoint(session.endpoint),

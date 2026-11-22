@@ -204,6 +204,7 @@ data "archive_file" "control" {
   type        = "zip"
   source_dir  = "${path.module}/../control"
   output_path = "${path.module}/build/control.zip"
+  excludes    = ["*.ts", "test", "test/**", "tsconfig.json"]
   depends_on  = [data.external.prepare]
 }
 
@@ -282,7 +283,7 @@ resource "aws_lambda_function" "api" {
   description      = "ExecDeck attendee workspace API"
   role             = aws_iam_role.control[0].arn
   runtime          = "nodejs24.x"
-  handler          = "aws-runtime.handler"
+  handler          = "dist/aws-runtime.handler"
   filename         = data.archive_file.control[0].output_path
   source_code_hash = data.archive_file.control[0].output_base64sha256
   timeout          = 30
@@ -308,7 +309,7 @@ resource "aws_lambda_function" "reaper" {
   function_name    = "${var.name}-reaper"
   role             = aws_iam_role.control[0].arn
   runtime          = "nodejs24.x"
-  handler          = "reaper.handler"
+  handler          = "dist/reaper.handler"
   filename         = data.archive_file.control[0].output_path
   source_code_hash = data.archive_file.control[0].output_base64sha256
   timeout          = 60

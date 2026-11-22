@@ -16,4 +16,4 @@ docker run --rm \
   -v "$ROOT:/execdeck" \
   -w /execdeck \
   node:24-bookworm-slim \
-  node scripts/terraform-prepare.mjs
+  node scripts/terraform-prepare.ts

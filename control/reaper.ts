@@ -1,15 +1,15 @@
-import { createMicrovms, store } from './aws-services.mjs'
+import { createMicrovms, store } from './aws-services.ts'
 
 const microvms = createMicrovms()
 
-async function terminate(microvmId) {
+async function terminate(microvmId: string) {
   const input = { microvmIdentifier: microvmId }
   try {
     const vm = await microvms.get(input)
-    if (!['TERMINATING', 'TERMINATED'].includes(vm.state)) await microvms.terminate(input)
+    if (!['TERMINATING', 'TERMINATED'].includes(vm.state ?? '')) await microvms.terminate(input)
     return true
   } catch (error) {
-    if (['ResourceNotFoundException', 'NotFoundException'].includes(error?.name)) return false
+    if (error instanceof Error && ['ResourceNotFoundException', 'NotFoundException'].includes(error?.name)) return false
     throw error
   }
 }
@@ -23,7 +23,7 @@ export async function handler() {
       await store.releaseSession(session)
     } catch (error) {
       results.deferred++
-      console.warn('Expired MicroVM cleanup deferred:', error.name || 'Error')
+      console.warn('Expired MicroVM cleanup deferred:', error instanceof Error ? error.name : 'Error')
     }
   }
   console.log(JSON.stringify(results))

@@ -25,11 +25,16 @@ Thanks for helping improve ExecDeck. Issues, documentation fixes, and focused pu
 
 Local preview uses Docker Compose from the repository root. Cloud changes should account for both the local container and Lambda MicroVM image paths.
 
-Run the control-plane regression tests from the repository root with Node.js 24:
+Use Node.js 24 from the repository root to type-check the control plane, sandbox, build script and tests, then run the control-plane regression suite:
 
 ```sh
+npm ci
 npm ci --prefix control
-node --test test/*.test.mjs
+npm ci --prefix microvm --ignore-scripts
+npm run typecheck
+npm test
 ```
 
-The tests use mocked AWS services and run without AWS credentials.
+The tests use mocked AWS services. Type checking uses the sandbox dependencies' declarations, so the native PTY build can be skipped here. Docker builds the native module for the running sandbox.
+
+Node.js runs the sandbox and Terraform preparation scripts directly from TypeScript. For Lambda, `npm run build:control` compiles the handlers to ESM in `control/dist/`. Terraform runs this build automatically.

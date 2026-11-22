@@ -1,8 +1,10 @@
 .terraform/
 infrastructure/build/
+/node_modules/
 slides/node_modules/
 slides/dist/
 control/node_modules/
+control/dist/
 microvm/node_modules/
 *.tfstate*
 *.auto.tfvars*

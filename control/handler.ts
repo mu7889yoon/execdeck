@@ -1,4 +1,42 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import type {
+  CreateMicrovmAuthTokenRequest, CreateMicrovmAuthTokenResponse,
+  GetMicrovmRequest, GetMicrovmResponse,
+  RunMicrovmRequest, RunMicrovmResponse, TerminateMicrovmRequest,
+} from '@aws-sdk/client-lambda-microvms'
+import type { Session, store as sessionStore } from './aws-services.ts'
+
+type HttpEvent = {
+  headers?: Record<string, string | undefined>
+  cookies?: string[]
+  requestContext?: { http?: { method: string } }
+  httpMethod?: string
+  rawPath?: string
+  path?: string
+  queryStringParameters?: Record<string, string | undefined>
+  body?: string | null
+  isBase64Encoded?: boolean
+}
+
+type LaunchedVM = Pick<RunMicrovmResponse, 'microvmId' | 'endpoint'>
+export type HandlerDependencies = {
+  store: Omit<typeof sessionStore, 'expiredSessions'>
+  microvms: {
+    run(input: RunMicrovmRequest): Promise<LaunchedVM>
+    get(input: GetMicrovmRequest): Promise<Pick<GetMicrovmResponse, 'state'>>
+    createAuthToken(input: CreateMicrovmAuthTokenRequest): Promise<CreateMicrovmAuthTokenResponse>
+    terminate(input: TerminateMicrovmRequest): Promise<unknown>
+  }
+  config: {
+    imageArn: string
+    ingressConnectorArn: string
+    egressConnectorArn: string
+    maxSessions: number
+    originVerifyToken?: string
+    sessionTTLSeconds?: number
+  }
+  fetchImpl?: (url: string, options: RequestInit) => Promise<Response>
+}
 
 const COOKIE_NAME = 'workshop_sid'
 const MAX_BODY_BYTES = 256 * 1024
@@ -7,7 +45,7 @@ const WORKSPACE_PORT = 8080
 const TERMINAL_PORT = 8081
 const LAUNCH_FAILED = { error: 'Could not start the workspace. Try again.' }
 
-function header(event, name) {
+function header(event: HttpEvent, name: string) {
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(event.headers || {})) {
     if (key.toLowerCase() === wanted) return String(value)
@@ -15,7 +53,7 @@ function header(event, name) {
   return ''
 }
 
-function sessionId(event) {
+function sessionId(event: HttpEvent) {
   const cookies = event.cookies || []
   const fromCookieList = cookies.map(cookie => cookie.split(';', 1)[0])
   const allCookies = [...fromCookieList, header(event, 'cookie')]
@@ -28,7 +66,7 @@ function sessionId(event) {
   return ''
 }
 
-function respond(statusCode, body, cookies = []) {
+function respond(statusCode: number, body: unknown, cookies: string[] = []) {
   return {
     statusCode,
     headers: {
@@ -41,45 +79,53 @@ function respond(statusCode, body, cookies = []) {
   }
 }
 
-function cookie(value, maxAge) {
+function cookie(value: string, maxAge: number) {
   return `${COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`
 }
 
-function parseBody(event) {
+function parseBody(event: HttpEvent): Record<string, unknown> {
   const raw = event.isBase64Encoded
     ? Buffer.from(event.body || '', 'base64').toString('utf8')
     : event.body || ''
   if (Buffer.byteLength(raw) > MAX_BODY_BYTES) throw Object.assign(new Error('Request too large'), { statusCode: 413 })
-  try { return JSON.parse(raw || '{}') } catch {
+  try {
+    const input: unknown = JSON.parse(raw || '{}')
+    return input && typeof input === 'object' ? input as Record<string, unknown> : {}
+  } catch {
     throw Object.assign(new Error('Invalid JSON'), { statusCode: 400 })
   }
 }
 
-function equalSecret(candidate, expected) {
+function invalidBody(error: unknown) {
+  const status = error instanceof Error && 'statusCode' in error ? Number(error.statusCode) : 400
+  return respond(status, { error: error instanceof Error ? error.message : 'Invalid JSON' })
+}
+
+function equalSecret(candidate: unknown, expected: unknown) {
   if (typeof candidate !== 'string' || typeof expected !== 'string') return false
   const a = Buffer.from(candidate)
   const b = Buffer.from(expected)
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-function normalizeEndpoint(endpoint) {
+function normalizeEndpoint(endpoint: string) {
   return endpoint.startsWith('https://') ? endpoint : `https://${endpoint}`
 }
 
-function alreadyTerminated(error) {
-  return ['ResourceNotFoundException', 'NotFoundException'].includes(error?.name)
+function alreadyTerminated(error: unknown) {
+  return error instanceof Error && ['ResourceNotFoundException', 'NotFoundException'].includes(error.name)
 }
 
-export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
+export function createHandler({ store, microvms, config, fetchImpl = fetch }: HandlerDependencies) {
   const sessionTTLSeconds = config.sessionTTLSeconds || 60 * 60
   if (!config.egressConnectorArn) throw new Error('A MicroVM egress connector is required')
-  const validOrigin = event => {
+  const validOrigin = (event: HttpEvent) => {
     const supplied = header(event, 'x-workshop-origin')
     const expected = config.originVerifyToken
     return Boolean(expected && supplied && equalSecret(supplied, expected))
   }
 
-  async function vmToken(session, port, expirationInMinutes) {
+  async function vmToken(session: Session, port: number, expirationInMinutes: number) {
     const tokenResponse = await microvms.createAuthToken({
       microvmIdentifier: session.microvmId,
       expirationInMinutes,
@@ -90,7 +136,8 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
     return token
   }
 
-  async function vmRequest(session, path, body) {
+  async function vmRequest(session: Session, path: string, body?: unknown) {
+    if (!session.endpoint) throw new Error('MicroVM endpoint is missing')
     const token = await vmToken(session, WORKSPACE_PORT, 1)
     const response = await fetchImpl(`${normalizeEndpoint(session.endpoint)}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
@@ -103,28 +150,31 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       signal: AbortSignal.timeout(18_000),
     })
     const text = await response.text()
-    let payload
+    let payload: unknown
     try { payload = JSON.parse(text) } catch { payload = { error: `MicroVM returned HTTP ${response.status}` } }
     return { status: response.status, payload }
   }
 
-  async function updateSessionReadiness(session) {
+  async function updateSessionReadiness(session: Session) {
     if (session.status === 'TERMINATING') return { status: 'expired', joined: false }
     if (!session.microvmId || !session.endpoint) return { status: 'starting' }
     try {
       const current = await microvms.get({ microvmIdentifier: session.microvmId })
-      if (['TERMINATING', 'TERMINATED'].includes(current.state)) {
+      if (['TERMINATING', 'TERMINATED'].includes(current.state ?? '')) {
         await store.releaseSession(session)
         return { status: 'expired', joined: false }
       }
-      if (!['RUNNING', 'SUSPENDED'].includes(current.state)) return { status: 'starting' }
+      if (!['RUNNING', 'SUSPENDED'].includes(current.state ?? '')) return { status: 'starting' }
       // An authenticated health request also resumes a suspended MicroVM.
       const health = await vmRequest(session, '/api/health')
-      if (health.status !== 200 || health.payload.ok !== true) return { status: 'starting' }
+      const body = health.payload
+      if (health.status !== 200 || !body || typeof body !== 'object' || !('ok' in body) || body.ok !== true) {
+        return { status: 'starting' }
+      }
       if (session.status !== 'READY') await store.updateSession(session.pk, { status: 'READY' }, 'STARTING')
       return { status: 'ready' }
     } catch (error) {
-      if (error.name === 'ConditionalCheckFailedException') {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
         const latest = await store.getSession(session.sid)
         if (!latest || latest.status === 'TERMINATING') return { status: 'expired', joined: false }
         return { status: latest.status === 'READY' ? 'ready' : 'starting' }
@@ -133,18 +183,18 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         await store.releaseSession(session).catch(() => {})
         return { status: 'expired', joined: false }
       }
-      console.warn('MicroVM readiness check failed:', error.name || 'Error', error.message || '')
+      console.warn('MicroVM readiness check failed:', error instanceof Error ? error.message : String(error))
       return { status: 'starting' }
     }
   }
 
-  async function workspaceUnavailable(session) {
+  async function workspaceUnavailable(session: Session) {
     const state = await updateSessionReadiness(session)
     if (state.joined === false) return respond(401, { error: 'Join the workshop first.' })
     if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting.' })
   }
 
-  async function cleanFailedLaunch(session, vm) {
+  async function cleanFailedLaunch(session: Session, vm?: LaunchedVM) {
     if (!vm?.microvmId) {
       await store.releaseSession(session).catch(() => {})
       return
@@ -162,12 +212,12 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         microvmId: vm.microvmId,
         ...(vm.endpoint ? { endpoint: normalizeEndpoint(vm.endpoint) } : {}),
       }).catch(() => {})
-      console.warn('Failed launch cleanup deferred to reaper:', error.name || 'Error')
+      console.warn('Failed launch cleanup deferred to reaper:', error instanceof Error ? error.name : 'Error')
     }
   }
 
-  async function launchSession(session) {
-    let vm
+  async function launchSession(session: Session) {
+    let vm: LaunchedVM | undefined
     try {
       vm = await microvms.run({
         imageIdentifier: config.imageArn,
@@ -178,12 +228,12 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         maximumDurationInSeconds: sessionTTLSeconds,
       })
       if (!vm.microvmId || !vm.endpoint) throw new Error('RunMicrovm returned no endpoint')
-      const changes = { status: 'STARTING', microvmId: vm.microvmId, endpoint: normalizeEndpoint(vm.endpoint) }
+      const changes = { status: 'STARTING' as const, microvmId: vm.microvmId, endpoint: normalizeEndpoint(vm.endpoint) }
       await store.updateSession(session.pk, changes, 'LAUNCHING')
       Object.assign(session, changes)
       return true
     } catch (error) {
-      if (error.name === 'ConditionalCheckFailedException') {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
         const latest = await store.getSession(session.sid)
         if (latest && latest.microvmId === vm?.microvmId) {
           Object.assign(session, latest)
@@ -191,12 +241,12 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         }
       }
       await cleanFailedLaunch(session, vm)
-      console.error('MicroVM launch failed:', error.name || 'Error', error.message || '')
+      console.error('MicroVM launch failed:', error instanceof Error ? error.message : String(error))
       return false
     }
   }
 
-  return async function handler(event) {
+  return async function handler(event: HttpEvent) {
     const method = event.requestContext?.http?.method || event.httpMethod || 'GET'
     const path = event.rawPath || event.path || '/'
 
@@ -216,7 +266,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
 
     if (method === 'POST' && path === '/api/join') {
       let input
-      try { input = parseBody(event) } catch (error) { return respond(error.statusCode || 400, { error: error.message }) }
+      try { input = parseBody(event) } catch (error) { return invalidBody(error) }
       if (typeof input?.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.requestId)) {
         return respond(400, { error: 'Reload the page and try joining again.' })
       }
@@ -244,7 +294,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
 
       const sid = randomBytes(32).toString('hex')
       const now = Math.floor(Date.now() / 1000)
-      const session = {
+      const session: Session = {
         pk: `SESSION#${sid}`,
         sid,
         joinKey,
@@ -278,7 +328,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       let input
       let vmPath = path
       if (writeWorkspace) {
-        try { input = parseBody(event) } catch (error) { return respond(error.statusCode || 400, { error: error.message }) }
+        try { input = parseBody(event) } catch (error) { return invalidBody(error) }
         if (typeof input?.path !== 'string' || input.path.length > 1024 || typeof input.content !== 'string') {
           return respond(400, { error: 'A valid workspace path and file content are required.' })
         }
@@ -295,7 +345,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
         result = await vmRequest(session, vmPath, input)
         if (result.status < 500) return respond(result.status, result.payload)
       } catch (error) {
-        console.error(writeWorkspace ? 'Workspace write failed:' : 'Workspace read failed:', error.name || 'Error')
+        console.error(writeWorkspace ? 'Workspace write failed:' : 'Workspace read failed:', error instanceof Error ? error.name : 'Error')
       }
       // Diagnose an unavailable VM without replaying a possibly completed write.
       const unavailable = await workspaceUnavailable(session)
@@ -306,7 +356,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
 
     if (method === 'POST' && path === '/api/terminal-token') {
       const state = await updateSessionReadiness(session)
-      if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting. Wait a moment and reconnect.' })
+      if (state.status !== 'ready' || !session.endpoint) return respond(409, { error: 'The workspace is still starting. Wait a moment and reconnect.' })
       try {
         const token = await vmToken(session, TERMINAL_PORT, 5)
         return respond(200, {
@@ -315,7 +365,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
           port: TERMINAL_PORT,
         })
       } catch (error) {
-        console.error('MicroVM terminal token request failed:', error.name || 'Error')
+        console.error('MicroVM terminal token request failed:', error instanceof Error ? error.name : 'Error')
         return respond(502, { error: 'Could not create a terminal connection token.' })
       }
     }
@@ -328,7 +378,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       } catch (error) {
         if (alreadyTerminated(error)) terminated = true
         else {
-          console.warn('MicroVM termination deferred to reaper:', error.name || 'Error')
+          console.warn('MicroVM termination deferred to reaper:', error instanceof Error ? error.name : 'Error')
           await store.updateSession(session.pk, { status: 'TERMINATING' }).catch(() => {})
         }
       }

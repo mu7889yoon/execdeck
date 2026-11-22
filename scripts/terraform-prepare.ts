@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const marker = join(root, 'infrastructure', 'build', 'prepare-hash')
 const excluded = new Set(['.git', '.terraform', 'node_modules', 'dist', 'build'])
 
-async function sourceFiles(directory, prefix = '') {
+async function sourceFiles(directory: string, prefix = ''): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
   const paths = []
   for (const entry of entries) {
@@ -23,6 +23,10 @@ async function sourceFiles(directory, prefix = '') {
 
 async function fingerprint() {
   const hash = createHash('sha256')
+  for (const file of ['package.json', 'package-lock.json', 'tsconfig.json']) {
+    hash.update(file)
+    hash.update(await readFile(join(root, file)))
+  }
   for (const path of ['control', 'slides', 'scripts']) {
     const absolute = join(root, path)
     for (const relativePath of (await sourceFiles(absolute)).sort()) {
@@ -33,7 +37,7 @@ async function fingerprint() {
   return hash.digest('hex')
 }
 
-function run(command, args) {
+function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8' })
   if (result.stdout) process.stderr.write(result.stdout)
   if (result.stderr) process.stderr.write(result.stderr)
@@ -42,22 +46,26 @@ function run(command, args) {
 }
 
 const hash = await fingerprint()
-const distIndex = join(root, 'slides', 'dist', 'index.html')
-const nodeModules = join(root, 'control', 'node_modules')
+const outputs = [
+  'slides/dist/index.html', 'control/node_modules',
+  'control/dist/aws-runtime.js', 'control/dist/reaper.js', 'control/dist/handler.js', 'control/dist/aws-services.js',
+]
 const oldHash = await readFile(marker, 'utf8').catch(() => '')
-const built = oldHash.trim() === hash
-  && await stat(distIndex).then(() => true).catch(() => false)
-  && await stat(nodeModules).then(() => true).catch(() => false)
+const built = oldHash.trim() === hash && (await Promise.all(outputs.map(path =>
+  stat(join(root, path)).then(() => true, () => false),
+))).every(Boolean)
 
 if (!built) {
+  run('npm', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund'])
   run('npm', ['ci', '--prefix', 'control', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'])
+  run('npm', ['run', 'build:control'])
   run('npm', ['ci', '--prefix', 'slides', '--no-audit', '--no-fund'])
   run('npm', ['run', 'build', '--prefix', 'slides'])
   await mkdir(dirname(marker), { recursive: true })
   await writeFile(marker, `${hash}\n`)
 }
 
-async function listFiles(directory, prefix = '') {
+async function listFiles(directory: string, prefix = ''): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
   const files = []
   for (const entry of entries) {

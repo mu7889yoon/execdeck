@@ -1,7 +1,7 @@
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { cp, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { spawn as spawnPty } from 'node-pty'
+import { spawn as spawnPty, type IPty } from 'node-pty'
 import { WebSocket, WebSocketServer } from 'ws'
 
 const HOST = process.env.HOST || '0.0.0.0'
@@ -94,13 +94,13 @@ const apiServer = createServer(async (req, res) => {
     }
     return respond(res, 404, { error: 'Not found.' })
   } catch (error) {
-    const statusCode = Number(error?.statusCode) || 500
+    const statusCode = error instanceof Error && 'statusCode' in error ? Number(error.statusCode) : 500
     if (statusCode >= 500) console.error('[workspace API]', error)
-    return respond(res, statusCode, { error: statusCode === 500 ? 'Workspace request failed.' : error.message })
+    return respond(res, statusCode, { error: statusCode === 500 || !(error instanceof Error) ? 'Workspace request failed.' : error.message })
   }
 })
 
-function respond(res, statusCode, body) {
+function respond(res: ServerResponse, statusCode: number, body: unknown) {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
@@ -108,7 +108,7 @@ function respond(res, statusCode, body) {
   res.end(JSON.stringify(body))
 }
 
-async function readJSON(req) {
+async function readJSON(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks = []
   let size = 0
   for await (const chunk of req) {
@@ -116,11 +116,14 @@ async function readJSON(req) {
     if (size > MAX_BODY_BYTES) throw Object.assign(new Error('Request body is too large.'), { statusCode: 413 })
     chunks.push(chunk)
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') }
+  try {
+    const body: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+    return body && typeof body === 'object' ? body as Record<string, unknown> : {}
+  }
   catch { throw Object.assign(new Error('Request body must be valid JSON.'), { statusCode: 400 }) }
 }
 
-function cleanRelativePath(value) {
+function cleanRelativePath(value: string) {
   if (typeof value !== 'string' || value.includes('\0')) throw Object.assign(new Error('Invalid file path.'), { statusCode: 400 })
   const normalized = value.replaceAll('\\', '/').replace(/^\/+/, '')
   const segments = normalized.split('/')
@@ -130,16 +133,16 @@ function cleanRelativePath(value) {
   return normalized
 }
 
-function isWithinWorkspace(candidate) {
+function isWithinWorkspace(candidate: string) {
   const pathFromRoot = relative(workspaceRealPath, candidate)
   return pathFromRoot === '' || (pathFromRoot !== '..' && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot))
 }
 
-function insideWorkspace(candidate) {
+function insideWorkspace(candidate: string) {
   return candidate !== workspaceRealPath && isWithinWorkspace(candidate)
 }
 
-async function safeExistingPath(value) {
+async function safeExistingPath(value: string) {
   const cleanPath = cleanRelativePath(value)
   const candidate = resolve(workspaceRealPath, cleanPath)
   let actual
@@ -149,7 +152,7 @@ async function safeExistingPath(value) {
   return actual
 }
 
-async function safeWritablePath(value) {
+async function safeWritablePath(value: string) {
   const cleanPath = cleanRelativePath(value)
   let parent = workspaceRealPath
   for (const segment of cleanPath.split('/').slice(0, -1)) {
@@ -171,8 +174,13 @@ async function safeWritablePath(value) {
   return candidate
 }
 
-async function buildTree(directory, prefix, budget = { remaining: MAX_TREE_ENTRIES }) {
-  const result = []
+type FileNode = { name: string; path: string } & (
+  | { type: 'file' }
+  | { type: 'directory'; children: FileNode[] }
+)
+
+async function buildTree(directory: string, prefix: string, budget = { remaining: MAX_TREE_ENTRIES }): Promise<FileNode[]> {
+  const result: FileNode[] = []
   const entries = await readdir(directory, { withFileTypes: true })
   entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
   for (const entry of entries) {
@@ -188,11 +196,11 @@ async function buildTree(directory, prefix, budget = { remaining: MAX_TREE_ENTRI
   return result
 }
 
-let shellPty
-let shellSocket
+let shellPty: IPty | undefined
+let shellSocket: WebSocket | undefined
 let shellOutput = ''
 
-function sendFrame(ws, frame) {
+function sendFrame(ws: WebSocket | undefined, frame: { type: 'output' | 'replay'; data: string }) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame))
 }
 
@@ -242,14 +250,17 @@ terminalWebSockets.on('connection', ws => {
   startShell()
   if (shellOutput) sendFrame(ws, { type: 'replay', data: shellOutput })
   ws.on('message', raw => {
-    let message
+    let message: unknown
     try { message = JSON.parse(String(raw)) } catch { return }
+    if (!message || typeof message !== 'object' || !('type' in message)) return
     if (message.type === 'clear') {
       shellOutput = ''
       return
     }
-    if (message.type === 'input' && typeof message.data === 'string') shellPty?.write(message.data)
-    if (message.type === 'resize' && Number.isInteger(message.cols) && Number.isInteger(message.rows)) {
+    if (message.type === 'input' && 'data' in message && typeof message.data === 'string') shellPty?.write(message.data)
+    if (message.type === 'resize' && 'cols' in message && 'rows' in message
+      && typeof message.cols === 'number' && typeof message.rows === 'number'
+      && Number.isInteger(message.cols) && Number.isInteger(message.rows)) {
       shellPty?.resize(Math.max(20, Math.min(240, message.cols)), Math.max(6, Math.min(100, message.rows)))
     }
   })

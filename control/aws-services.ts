@@ -1,5 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
+  type TransactWriteCommandInput,
+  type ScanCommandInput,
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
@@ -7,7 +9,26 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
-import { LambdaMicrovmsClient, RunMicrovmCommand, GetMicrovmCommand, CreateMicrovmAuthTokenCommand, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms'
+import {
+  LambdaMicrovmsClient,
+  RunMicrovmCommand, type RunMicrovmRequest,
+  GetMicrovmCommand, type GetMicrovmRequest,
+  CreateMicrovmAuthTokenCommand, type CreateMicrovmAuthTokenRequest,
+  TerminateMicrovmCommand, type TerminateMicrovmRequest,
+} from '@aws-sdk/client-lambda-microvms'
+
+export type Session = {
+  pk: string
+  sid: string
+  joinKey: string
+  createdAt: number
+  expiresAt: number
+  status: 'LAUNCHING' | 'STARTING' | 'READY' | 'TERMINATING'
+  microvmId?: string
+  endpoint?: string
+}
+
+type TransactionItems = NonNullable<TransactWriteCommandInput['TransactItems']>
 
 export const region = process.env.AWS_REGION || 'ap-northeast-1'
 const tableName = process.env.SESSION_TABLE
@@ -15,39 +36,39 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }), {
   marshallOptions: { removeUndefinedValues: true },
 })
 
-async function getItem(pk) {
+async function getItem<T>(pk: string) {
   const { Item } = await ddb.send(new GetCommand({
     TableName: tableName,
     Key: { pk },
     ConsistentRead: true,
   }))
-  return Item
+  return Item as T | undefined
 }
 
-async function tryTransaction(items) {
+async function tryTransaction(items: TransactionItems) {
   try {
     await ddb.send(new TransactWriteCommand({ TransactItems: items }))
     return true
   } catch (error) {
-    if (error.name === 'TransactionCanceledException') return false
+    if (error instanceof Error && error.name === 'TransactionCanceledException') return false
     throw error
   }
 }
 
 export const store = {
-  getSession(sid) {
-    return getItem(`SESSION#${sid}`)
+  getSession(sid: string) {
+    return getItem<Session>(`SESSION#${sid}`)
   },
 
-  getJoin(joinKey) {
-    return getItem(`JOIN#${joinKey}`)
+  getJoin(joinKey: string) {
+    return getItem<{ sid: string }>(`JOIN#${joinKey}`)
   },
 
-  async deleteJoin(joinKey) {
+  async deleteJoin(joinKey: string) {
     await ddb.send(new DeleteCommand({ TableName: tableName, Key: { pk: `JOIN#${joinKey}` } }))
   },
 
-  reserveSession(session, maxSessions) {
+  reserveSession(session: Session, maxSessions: number) {
     return tryTransaction([
       {
         Put: {
@@ -80,11 +101,11 @@ export const store = {
     ])
   },
 
-  async updateSession(pk, changes, expectedStatus) {
+  async updateSession(pk: string, changes: Pick<Session, 'status' | 'microvmId' | 'endpoint'>, expectedStatus?: Session['status']) {
     const pairs = Object.entries(changes).filter(([, value]) => value !== undefined)
     if (!pairs.length) return
-    const names = {}
-    const values = {}
+    const names: Record<string, string> = {}
+    const values: Record<string, string> = {}
     const assignments = pairs.map(([key, value], index) => {
       names[`#n${index}`] = key
       values[`:v${index}`] = value
@@ -104,8 +125,8 @@ export const store = {
     }))
   },
 
-  releaseSession(session) {
-    const items = [
+  releaseSession(session: Session) {
+    const items: TransactionItems = [
       {
         Delete: {
           TableName: tableName,
@@ -130,9 +151,9 @@ export const store = {
     return tryTransaction(items)
   },
 
-  async expiredSessions(now) {
-    const sessions = []
-    let ExclusiveStartKey
+  async expiredSessions(now: number) {
+    const sessions: Session[] = []
+    let ExclusiveStartKey: ScanCommandInput['ExclusiveStartKey']
     do {
       const result = await ddb.send(new ScanCommand({
         TableName: tableName,
@@ -141,19 +162,19 @@ export const store = {
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: { ':prefix': 'SESSION#', ':now': now, ':terminating': 'TERMINATING' },
       }))
-      sessions.push(...(result.Items || []))
+      sessions.push(...((result.Items || []) as Session[]))
       ExclusiveStartKey = result.LastEvaluatedKey
     } while (ExclusiveStartKey)
     return sessions
   },
 }
 
-export function createMicrovms(maxAttempts) {
+export function createMicrovms(maxAttempts?: number) {
   const client = new LambdaMicrovmsClient({ region, maxAttempts })
   return {
-    run(input) { return client.send(new RunMicrovmCommand(input)) },
-    get(input) { return client.send(new GetMicrovmCommand(input)) },
-    createAuthToken(input) { return client.send(new CreateMicrovmAuthTokenCommand(input)) },
-    terminate(input) { return client.send(new TerminateMicrovmCommand(input)) },
+    run(input: RunMicrovmRequest) { return client.send(new RunMicrovmCommand(input)) },
+    get(input: GetMicrovmRequest) { return client.send(new GetMicrovmCommand(input)) },
+    createAuthToken(input: CreateMicrovmAuthTokenRequest) { return client.send(new CreateMicrovmAuthTokenCommand(input)) },
+    terminate(input: TerminateMicrovmRequest) { return client.send(new TerminateMicrovmCommand(input)) },
   }
 }

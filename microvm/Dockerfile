@@ -13,9 +13,9 @@ RUN apt-get update \
   && apt-get purge -y --auto-remove python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-COPY server.mjs ./server.mjs
+COPY server.ts ./server.ts
 COPY workspace /workspace
 RUN chmod -R a+rX /app /workspace
 
 EXPOSE 8080 8081
-CMD ["node", "server.mjs"]
+CMD ["node", "server.ts"]

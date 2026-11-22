@@ -13,6 +13,7 @@ type FileNode = { name: string; path: string; type: 'file' | 'directory'; childr
 type MonacoModel = Monaco.editor.ITextModel
 type MonacoEditor = Monaco.editor.IStandaloneCodeEditor
 
+const PENDING_JOIN_KEY = 'execdeck.pendingJoin'
 const TERMINAL_PROTOCOL = 'execdeck-terminal'
 const nav = useNav()
 const editorHost = ref<HTMLDivElement>()
@@ -183,10 +184,11 @@ async function openFile(path?: string) {
   const selection = ++fileSelection
   if (path === currentFile.value) return
   try {
+    const payload = await readJSON(await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`))
+    if (selection !== fileSelection || !ready.value) return
+    if (!await saveFile() || dirty || selection !== fileSelection || !ready.value) return
     let model = models.get(path)
     if (!model) {
-      const payload = await readJSON(await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`))
-      if (selection !== fileSelection || !ready.value) return
       const uri = monacoApi.Uri.from({ scheme: 'file', path: `/${path}` })
       model = monacoApi.editor.createModel(payload.content, languageFor(path), uri)
       model.onDidChangeContent(() => {
@@ -197,8 +199,9 @@ async function openFile(path?: string) {
         saveTimer = setTimeout(() => { void saveFile() }, 450)
       })
       models.set(path, model)
+    } else if (model.getValue() !== payload.content) {
+      model.setValue(payload.content)
     }
-    if (!await saveFile() || dirty || selection !== fileSelection || !ready.value) return
     const oldState = editor.saveViewState()
     if (currentFile.value && oldState) viewStates.set(currentFile.value, oldState)
     currentFile.value = path
@@ -245,11 +248,12 @@ async function refreshActiveFile() {
   const path = currentFile.value
   const model = models.get(path)
   if (!model || dirty) return
+  const selection = fileSelection
   const version = model.getVersionId()
   try {
     const response = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`)
     const payload = await readJSON(response)
-    if (path !== currentFile.value || models.get(path) !== model || dirty || version !== model.getVersionId()) return
+    if (selection !== fileSelection || path !== currentFile.value || models.get(path) !== model || dirty || version !== model.getVersionId()) return
     if (typeof payload.content !== 'string' || model.getValue() === payload.content) return
     applyingRemoteFile = true
     model.setValue(payload.content)
@@ -283,17 +287,6 @@ function initializeTerminal() {
     fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
     terminal.open(terminalHost.value!)
-    terminal.onData(data => {
-      if (socket?.readyState !== WebSocket.OPEN) return
-      const currentSocket = socket
-      if (data.includes('\r')) {
-        void saveFile().then(saved => {
-          if (saved && currentSocket.readyState === WebSocket.OPEN) currentSocket.send(JSON.stringify({ type: 'input', data }))
-        })
-      } else {
-        currentSocket.send(JSON.stringify({ type: 'input', data }))
-      }
-    })
     terminal.textarea?.addEventListener('focus', lockTerminalShortcuts)
     terminal.textarea?.addEventListener('blur', unlockTerminalShortcuts)
     terminal.onResize(({ cols, rows }) => {
@@ -357,6 +350,26 @@ async function connectTerminal() {
     const newSocket = new WebSocket(address, protocols)
     socket = newSocket
     connectionStatus.value = 'Connecting…'
+    // Keep all keystrokes behind an Enter that is waiting for an editor save.
+    let queuedInput = Promise.resolve()
+    let inputBatch = 0
+    const inputListener = terminal.onData(data => {
+      if (newSocket.readyState !== WebSocket.OPEN) return
+      const batch = inputBatch
+      queuedInput = queuedInput.then(async () => {
+        if (socket !== newSocket || batch !== inputBatch) return
+        if (data.includes('\r') && !await saveFile()) {
+          inputBatch++
+          return
+        }
+        if (socket === newSocket && newSocket.readyState === WebSocket.OPEN) {
+          newSocket.send(JSON.stringify({ type: 'input', data }))
+        }
+      }).catch(error => {
+        inputBatch++
+        errorMessage.value = String(error)
+      })
+    })
     newSocket.addEventListener('open', () => {
       if (socket !== newSocket) return
       connectionStatus.value = 'Connected'
@@ -375,6 +388,7 @@ async function connectTerminal() {
       }
     })
     newSocket.addEventListener('close', event => {
+      inputListener.dispose()
       if (socket !== newSocket) return
       socket = undefined
       if (!ready.value || event.code === 4001) {
@@ -401,6 +415,7 @@ async function readSession() {
     disconnectTerminal()
   }
   if (!wasReady && isReady) {
+    sessionStorage.removeItem(PENDING_JOIN_KEY)
     for (const model of models.values()) model.dispose()
     models.clear()
     viewStates.clear()
@@ -437,7 +452,8 @@ async function joinWorkshop() {
   errorMessage.value = ''
   connectionStatus.value = 'Starting your workspace…'
   try {
-    const requestId = crypto.randomUUID()
+    const requestId = sessionStorage.getItem(PENDING_JOIN_KEY) || crypto.randomUUID()
+    sessionStorage.setItem(PENDING_JOIN_KEY, requestId)
     await readJSON(await postJSON('/api/join', { requestId }))
     for (let attempt = 0; attempt < 120; attempt++) {
       await readSession()

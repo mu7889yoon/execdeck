@@ -80,7 +80,7 @@ export const store = {
     ])
   },
 
-  async updateSession(pk, changes) {
+  async updateSession(pk, changes, expectedStatus) {
     const pairs = Object.entries(changes).filter(([, value]) => value !== undefined)
     if (!pairs.length) return
     const names = {}
@@ -90,23 +90,21 @@ export const store = {
       values[`:v${index}`] = value
       return `#n${index} = :v${index}`
     })
+    if (expectedStatus) {
+      names['#status'] = 'status'
+      values[':expected'] = expectedStatus
+    }
     await ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { pk },
       UpdateExpression: `SET ${assignments.join(', ')}`,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
-      ConditionExpression: 'attribute_exists(pk)',
+      ConditionExpression: expectedStatus ? '#status = :expected' : 'attribute_exists(pk)',
     }))
   },
 
-  async releaseSession(session) {
-    const current = await getItem(session.pk)
-    if (!current) return false
-    if (!current.counted) {
-      await ddb.send(new DeleteCommand({ TableName: tableName, Key: { pk: session.pk } }))
-      return false
-    }
+  releaseSession(session) {
     const items = [
       {
         Delete: {
@@ -126,8 +124,8 @@ export const store = {
         },
       },
     ]
-    if (current.joinKey) {
-      items.push({ Delete: { TableName: tableName, Key: { pk: `JOIN#${current.joinKey}` } } })
+    if (session.joinKey) {
+      items.push({ Delete: { TableName: tableName, Key: { pk: `JOIN#${session.joinKey}` } } })
     }
     return tryTransaction(items)
   },

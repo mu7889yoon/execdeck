@@ -24,3 +24,12 @@ Thanks for helping improve ExecDeck. Issues, documentation fixes, and focused pu
 - `infrastructure/` contains the Terraform stack.
 
 Local preview uses Docker Compose from the repository root. Cloud changes should account for both the local container and Lambda MicroVM image paths.
+
+Run the control-plane regression tests from the repository root with Node.js 24:
+
+```sh
+npm ci --prefix control
+node --test test/*.test.mjs
+```
+
+The tests use mocked AWS services and run without AWS credentials.

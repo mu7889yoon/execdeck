@@ -109,6 +109,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
   }
 
   async function updateSessionReadiness(session) {
+    if (session.status === 'TERMINATING') return { status: 'expired', joined: false }
     if (!session.microvmId || !session.endpoint) return { status: 'starting' }
     try {
       const current = await microvms.get({ microvmIdentifier: session.microvmId })
@@ -120,9 +121,14 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       // An authenticated health request also resumes a suspended MicroVM.
       const health = await vmRequest(session, '/api/health')
       if (health.status !== 200 || health.payload.ok !== true) return { status: 'starting' }
-      if (session.status !== 'READY') await store.updateSession(session.pk, { status: 'READY' })
+      if (session.status !== 'READY') await store.updateSession(session.pk, { status: 'READY' }, 'STARTING')
       return { status: 'ready' }
     } catch (error) {
+      if (error.name === 'ConditionalCheckFailedException') {
+        const latest = await store.getSession(session.sid)
+        if (!latest || latest.status === 'TERMINATING') return { status: 'expired', joined: false }
+        return { status: latest.status === 'READY' ? 'ready' : 'starting' }
+      }
       if (alreadyTerminated(error)) {
         await store.releaseSession(session).catch(() => {})
         return { status: 'expired', joined: false }
@@ -130,6 +136,12 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       console.warn('MicroVM readiness check failed:', error.name || 'Error', error.message || '')
       return { status: 'starting' }
     }
+  }
+
+  async function workspaceUnavailable(session) {
+    const state = await updateSessionReadiness(session)
+    if (state.joined === false) return respond(401, { error: 'Join the workshop first.' })
+    if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting.' })
   }
 
   async function cleanFailedLaunch(session, vm) {
@@ -167,10 +179,17 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       })
       if (!vm.microvmId || !vm.endpoint) throw new Error('RunMicrovm returned no endpoint')
       const changes = { status: 'STARTING', microvmId: vm.microvmId, endpoint: normalizeEndpoint(vm.endpoint) }
-      await store.updateSession(session.pk, changes)
+      await store.updateSession(session.pk, changes, 'LAUNCHING')
       Object.assign(session, changes)
       return true
     } catch (error) {
+      if (error.name === 'ConditionalCheckFailedException') {
+        const latest = await store.getSession(session.sid)
+        if (latest && latest.microvmId === vm?.microvmId) {
+          Object.assign(session, latest)
+          return latest.status === 'STARTING' || latest.status === 'READY'
+        }
+      }
       await cleanFailedLaunch(session, vm)
       console.error('MicroVM launch failed:', error.name || 'Error', error.message || '')
       return false
@@ -205,7 +224,7 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       const currentSid = sessionId(event)
       if (currentSid) {
         const current = await store.getSession(currentSid)
-        if (current && current.expiresAt > Math.floor(Date.now() / 1000)) {
+        if (current && current.status !== 'TERMINATING' && current.expiresAt > Math.floor(Date.now() / 1000)) {
           return respond(200, { joined: true, status: current.status }, [cookie(currentSid, Math.max(1, current.expiresAt - Math.floor(Date.now() / 1000)))])
         }
       }
@@ -267,15 +286,22 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       } else if (path === '/api/workspace/file') {
         vmPath += `?path=${encodeURIComponent(event.queryStringParameters?.path || '')}`
       }
-      const state = await updateSessionReadiness(session)
-      if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting.' })
+      if (session.status !== 'READY') {
+        const unavailable = await workspaceUnavailable(session)
+        if (unavailable) return unavailable
+      }
+      let result
       try {
-        const result = await vmRequest(session, vmPath, input)
-        return respond(result.status, result.payload)
+        result = await vmRequest(session, vmPath, input)
+        if (result.status < 500) return respond(result.status, result.payload)
       } catch (error) {
         console.error(writeWorkspace ? 'Workspace write failed:' : 'Workspace read failed:', error.name || 'Error')
-        return respond(502, { error: writeWorkspace ? 'Could not save the workspace file.' : 'Could not read the workspace.' })
       }
+      // Diagnose an unavailable VM without replaying a possibly completed write.
+      const unavailable = await workspaceUnavailable(session)
+      if (unavailable) return unavailable
+      if (result) return respond(result.status, result.payload)
+      return respond(502, { error: writeWorkspace ? 'Could not save the workspace file.' : 'Could not read the workspace.' })
     }
 
     if (method === 'POST' && path === '/api/terminal-token') {
@@ -283,7 +309,6 @@ export function createHandler({ store, microvms, config, fetchImpl = fetch }) {
       if (state.status !== 'ready') return respond(409, { error: 'The workspace is still starting. Wait a moment and reconnect.' })
       try {
         const token = await vmToken(session, TERMINAL_PORT, 5)
-        if (!token) throw new Error('MicroVM auth token was not returned')
         return respond(200, {
           endpoint: normalizeEndpoint(session.endpoint),
           token,
